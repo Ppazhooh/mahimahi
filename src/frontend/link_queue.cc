@@ -8,14 +8,25 @@
 #include "util.hh"
 #include "ezio.hh"
 #include "abstract_packet_queue.hh"
+#include <iostream>
+#include <unistd.h>
 
 using namespace std;
+using namespace moodycamel;
+
 
 LinkQueue::LinkQueue( const string & link_name, const string & filename, const string & logfile,
                       const bool repeat, const bool graph_throughput, const bool graph_delay,
                       unique_ptr<AbstractPacketQueue> && packet_queue,
                       const string & command_line )
-    : next_delivery_( 0 ),
+    : 
+      arrival_log_queue(1000),
+      drop_log_queue(1000),
+      dep_opp_log_queue(1000),
+      departure_log_queue(1000),
+      logger_thread (nullptr),
+      lock (nullptr),
+      next_delivery_( 0 ),
       schedule_(),
       base_timestamp_( timestamp() ),
       packet_queue_( move( packet_queue ) ),
@@ -25,11 +36,12 @@ LinkQueue::LinkQueue( const string & link_name, const string & filename, const s
       log_(),
       throughput_graph_( nullptr ),
       delay_graph_( nullptr ),
-      repeat_( repeat ),
-      finished_( false )
+      repeat_( repeat ), finished_( false )
 {
     assert_not_root();
-
+    // 
+    // this->initialize_logging(); 
+    // 
     /* open filename and load schedule */
     ifstream trace_file( filename );
 
@@ -79,6 +91,13 @@ LinkQueue::LinkQueue( const string & link_name, const string & filename, const s
         if ( prefix ) {
             *log_ << "# mahimahi config: " << prefix << endl;
         }
+        /*
+         * Soheil: To sync up the Agent's perception of time and the current time on the trace
+         */
+        std::unique_ptr<std::ofstream> log__;
+        log__.reset(new ofstream(logfile+"_init_timestamp"));
+        *log__ << initial_timestamp()+base_timestamp_ << endl;
+
     }
 
     /* create graphs if called for */
@@ -101,58 +120,106 @@ LinkQueue::LinkQueue( const string & link_name, const string & filename, const s
                                                  1, false, 250,
                                                  [] ( int, int & x ) { x = -1; } ) );
     }
+
+    logger_thread = std::unique_ptr<std::thread>(new std::thread(&LinkQueue::log_logs, this));
+    lock = std::unique_ptr<std::mutex>(new std::mutex());
+
+}
+
+// LinkQueue::~LinkQueue(){
+//     logger_thread.join();
+// }
+
+void LinkQueue::log_logs(){
+    while(true){
+        while(arrival_log_queue.peek() != nullptr){
+            std::pair<uint64_t, size_t> next;
+            arrival_log_queue.try_dequeue(next);
+            *log_ << next.first << " + " << next.second << endl;
+        }
+        
+        while(drop_log_queue.peek() != nullptr){
+            std::pair<uint64_t, std::pair<size_t, size_t> > next;
+            drop_log_queue.try_dequeue(next);
+            *log_ << next.first << " d " << next.second.first << " " << next.second.second << endl;
+        }
+
+        while(dep_opp_log_queue.peek() != nullptr){
+            std::pair<uint64_t, size_t> next;
+            dep_opp_log_queue.try_dequeue(next);
+            *log_ << next.first << " # " << next.second << endl;
+        }
+
+        while(departure_log_queue.peek() != nullptr){
+            std::pair<uint64_t, std::pair<size_t, size_t> > next;
+            departure_log_queue.try_dequeue(next);
+            *log_ << next.first << " - " << next.second.first << " " << next.second.second << endl;
+        }
+
+
+        usleep(10000);
+    }
 }
 
 void LinkQueue::record_arrival( const uint64_t arrival_time, const size_t pkt_size )
 {
     /* log it */
     if ( log_ ) {
-        *log_ << arrival_time << " + " << pkt_size << endl;
+        arrival_log_queue.enqueue(std::make_pair(arrival_time, pkt_size));
     }
-
     /* meter it */
-    if ( throughput_graph_ ) {
-        throughput_graph_->add_value_now( 1, pkt_size );
-    }
+    // if ( throughput_graph_ ) {
+        // throughput_graph_->add_value_now( 1, pkt_size );
+    // }
 }
 
 void LinkQueue::record_drop( const uint64_t time, const size_t pkts_dropped, const size_t bytes_dropped)
 {
     /* log it */
     if ( log_ ) {
-        *log_ << time << " d " << pkts_dropped << " " << bytes_dropped << endl;
+        drop_log_queue.enqueue(std::make_pair(time, std::make_pair(pkts_dropped, bytes_dropped)));
     }
+    // if ( log_ ) {
+    //     *log_ << time << " d " << pkts_dropped << " " << bytes_dropped << endl;
+    // }
 }
 
 void LinkQueue::record_departure_opportunity( void )
 {
-    /* log the delivery opportunity */
     if ( log_ ) {
-        *log_ << next_delivery_time() << " # " << PACKET_SIZE << endl;
+        dep_opp_log_queue.enqueue(std::make_pair(next_delivery_time(), PACKET_SIZE));
     }
+    /* log the delivery opportunity */
+    // if ( log_ ) {
+    //     *log_ << next_delivery_time() << " # " << PACKET_SIZE << endl;
+    // }
 
     /* meter the delivery opportunity */
-    if ( throughput_graph_ ) {
-        throughput_graph_->add_value_now( 0, PACKET_SIZE );
-    }    
+    // if ( throughput_graph_ ) {
+    //     throughput_graph_->add_value_now( 0, PACKET_SIZE );
+    // }    
 }
 
 void LinkQueue::record_departure( const uint64_t departure_time, const QueuedPacket & packet )
 {
-    /* log the delivery */
     if ( log_ ) {
-        *log_ << departure_time << " - " << packet.contents.size()
-              << " " << departure_time - packet.arrival_time << endl;
+        departure_log_queue.enqueue(std::make_pair(departure_time, std::make_pair(packet.contents.size(), departure_time - packet.arrival_time)));
     }
+
+    /* log the delivery */
+    // if ( log_ ) {
+    //     *log_ << departure_time << " - " << packet.contents.size()
+    //           << " " << departure_time - packet.arrival_time << endl;
+    // }
 
     /* meter the delivery */
-    if ( throughput_graph_ ) {
-        throughput_graph_->add_value_now( 2, packet.contents.size() );
-    }
+    // if ( throughput_graph_ ) {
+    //     throughput_graph_->add_value_now( 2, packet.contents.size() );
+    // }
 
-    if ( delay_graph_ ) {
-        delay_graph_->set_max_value_now( 0, departure_time - packet.arrival_time );
-    }    
+    // if ( delay_graph_ ) {
+    //     delay_graph_->set_max_value_now( 0, departure_time - packet.arrival_time );
+    // }    
 }
 
 void LinkQueue::read_packet( const string & contents )

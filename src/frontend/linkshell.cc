@@ -180,6 +180,9 @@ int main( int argc, char *argv[] )
         }
 
         PacketShell<LinkQueue> link_shell_app( "link", user_environment );
+        
+        std::cout << "hello from us" << std::endl;
+
 
         link_shell_app.start_uplink( "[link] ", command,
                                      "Uplink", uplink_filename, uplink_logfile, repeat, meter_uplink, meter_uplink_delay,

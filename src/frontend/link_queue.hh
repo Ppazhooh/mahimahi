@@ -8,14 +8,25 @@
 #include <string>
 #include <fstream>
 #include <memory>
+#include <thread>
 
 #include "file_descriptor.hh"
 #include "binned_livegraph.hh"
 #include "abstract_packet_queue.hh"
+#include "readerwriterqueue.hh"
 
 class LinkQueue
 {
 private:
+
+    moodycamel::ReaderWriterQueue<std::pair<uint64_t, size_t> > arrival_log_queue;
+    moodycamel::ReaderWriterQueue<std::pair<uint64_t, std::pair<size_t, size_t> > > drop_log_queue;
+    moodycamel::ReaderWriterQueue<std::pair<uint64_t, size_t> > dep_opp_log_queue; 
+    moodycamel::ReaderWriterQueue<std::pair<uint64_t, std::pair<size_t, uint64_t> > > departure_log_queue;
+    std::unique_ptr<std::thread> logger_thread;
+    std::unique_ptr<std::mutex> lock;
+
+     
     const static unsigned int PACKET_SIZE = 1504; /* default max TUN payload size */
 
     unsigned int next_delivery_;
@@ -46,11 +57,16 @@ private:
     void rationalize( const uint64_t now );
     void dequeue_packet( void );
 
+    void log_logs();
+
+
 public:
     LinkQueue( const std::string & link_name, const std::string & filename, const std::string & logfile,
                const bool repeat, const bool graph_throughput, const bool graph_delay,
                std::unique_ptr<AbstractPacketQueue> && packet_queue,
                const std::string & command_line );
+
+    // ~LinkQueue();
 
     void read_packet( const std::string & contents );
 
